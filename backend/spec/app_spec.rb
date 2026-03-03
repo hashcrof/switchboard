@@ -1,5 +1,7 @@
 require "spec_helper"
 require "rack/test"
+require "net/http"
+require "rack/handler/puma"
 require_relative "../app"
 
 RSpec.describe "App" do
@@ -166,7 +168,7 @@ RSpec.describe "App" do
       },
       "contribution": {
         "createdAt": "2023-06-09T15:59:27-04:00",
-        "orderNumber": "AB1111",
+        "orderNumber": "AB1113",
         "contributionForm": "sticker103",
         "refcodes": {
           "refcode": "ref-Crane"
@@ -281,5 +283,111 @@ RSpec.describe "App" do
 
     expect(last_response.status).to eq(400)
     expect(JSON.parse(last_response.body)).to eq({"error" => "Invalid payload"})
+  end
+
+  describe "real HTTP client " do
+    let(:sse_payload) do
+      {
+        "donor": {
+          "firstname": "Shreyes",
+          "lastname": "Seshasai",
+          "addr1": "123 Main St",
+          "city": "Washington",
+          "state": "DC",
+          "zip": "20001",
+          "country": "United States",
+          "isEligibleForExpressLane": false,
+          "employerData": {
+            "employer": "Switchboard",
+            "occupation": "Engineer",
+          },
+          "email": "example@example.com",
+          "phone": "8885551234"
+        },
+        "contribution": {
+          "createdAt": "2023-06-09T15:59:27-04:00",
+          "orderNumber": "AB1114",
+          "contributionForm": "sticker103",
+          "refcodes": {
+            "refcode": "ref-Crane"
+          },
+          "refcode": "ref-Crane",
+          "recurringPeriod": "once",
+          "recurringDuration": 1,
+          "isRecurring": false,
+          "isPaypal": true,
+          "isMobile": false,
+          "isExpress": false,
+          "withExpressLane": false,
+          "expressSignup": false,
+          "textMessageOption": "opt_in",
+          "customFields": [],
+          "status": "approved",
+        },
+        "lineitems": [
+          {
+            "sequence": 1,
+            "entityId": 1,
+            "fecId": "C00000",
+            "committeeName": "Eric for Dogcatcher",
+            "amount": "5.0",
+            "paidAt": "2023-08-27T04:59:45-04:00",
+            "paymentId": 242184335,
+            "lineitemId": 500314607
+          }
+        ],
+        "form": {
+          "name": "sticker103",
+          "kind": "page",
+          "managingEntityName": "Eric for Dogcatcher",
+          "managingEntityCommitteeName": "Eric for Dogcatcher"
+        }
+      }
+    end
+
+    before(:context) do
+      @thread = Thread.new do
+        Rack::Handler::Puma.run(app, Port: 9877, Silent: true)
+      end
+      sleep(2)
+    end
+
+    it 'receives donation data over a live stream' do
+      ready = Queue.new
+      data = []
+      sse_client_thr = Thread.new do
+        Net::HTTP.start("localhost", 9877) do |http|
+          request = Net::HTTP::Get.new("/stream")
+          http.request(request) do |response|
+            ready.push(:ready)
+            response.read_body do |chunk|
+              next if chunk.include?("heartbeat")
+              data << chunk
+              break if chunk.include?("data")
+            end
+          end
+        end
+      end
+
+      ready.pop
+      encoded = Base64.strict_encode64("testuser:testpass")
+      response = Net::HTTP.post(
+        URI("http://localhost:9877/webhook/actblue_donation"),
+        sse_payload.to_json,
+        "Content-Type" => "application/json",
+        "Authorization" => "Basic #{encoded}"
+      )
+      sse_client_thr.join(5)
+
+      data.each do |d|
+        expected_data = {id:"AB1114",firstname:"Shreyes",lastname:"Seshasai",email:"example@example.com",amount:5,refcode:"ref-Crane",timestamp:"2023-06-09T15:59:27-04:00",recurring:false}
+        expect(d.force_encoding("UTF-8")).to eq("data: #{expected_data.to_json}\n\n")
+      end
+      expect(JSON.parse(response.body)).to eq({"status" => "received"})
+    end
+
+    after(:context) do
+      @thread.kill
+    end
   end
 end
