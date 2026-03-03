@@ -1,15 +1,15 @@
 require "sinatra"
 require "json"
 require "dotenv/load"
-require "set"
+require "concurrent"
 require_relative "lib/actblue"
 
 set :server, :puma
 set :bind, 'localhost'
 set :port, ENV["PORT"] || 8000
-set :connections, Set.new
+set :connections, Concurrent::Set.new
 
-PROCESSED_ORDERS = Set.new
+PROCESSED_ORDERS = Concurrent::Set.new
 
 
 before do
@@ -70,12 +70,10 @@ post "/webhook/actblue_donation" do
 
   idempotency_key = ActBlue.idempotency_key(contribution["orderNumber"], line_item["paidAt"], line_item["lineitemId"])
 
-  if PROCESSED_ORDERS.include? idempotency_key
+  unless PROCESSED_ORDERS.add?(idempotency_key)
     puts "Duplicate webhook received for order #{contribution["orderNumber"]} paid at #{line_item["paidAt"]} with line item id #{line_item["lineitemId"]}, skipping"
     return { status: "already_processed" }.to_json
   end
-
-  PROCESSED_ORDERS << idempotency_key
 
   donation = {
     id:        contribution["orderNumber"],
