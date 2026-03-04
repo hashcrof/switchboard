@@ -204,6 +204,7 @@ RSpec.describe "App" do
     header "Host", "localhost"
     ENV["AUTH_USER"] = "testuser"
     ENV["AUTH_PASSWORD"] = "testpass"
+    ENV["TOKEN_SECRET"] = "testsecret"
   end
 
   it "returns status ok" do
@@ -353,11 +354,15 @@ RSpec.describe "App" do
     end
 
     it 'receives donation data over a live stream' do
+      encoded = Base64.strict_encode64("testuser:testpass")
+      token_response = Net::HTTP.get_response(URI("http://localhost:9877/stream/token"), "Authorization" => "Basic #{encoded}")
+      token = JSON.parse(token_response.body)["token"]
+
       ready = Queue.new
       data = []
       sse_client_thr = Thread.new do
         Net::HTTP.start("localhost", 9877) do |http|
-          request = Net::HTTP::Get.new("/stream")
+          request = Net::HTTP::Get.new("/stream?token=#{token}")
           http.request(request) do |response|
             ready.push(:ready)
             response.read_body do |chunk|
@@ -370,7 +375,6 @@ RSpec.describe "App" do
       end
 
       ready.pop
-      encoded = Base64.strict_encode64("testuser:testpass")
       response = Net::HTTP.post(
         URI("http://localhost:9877/webhook/actblue_donation"),
         sse_payload.to_json,

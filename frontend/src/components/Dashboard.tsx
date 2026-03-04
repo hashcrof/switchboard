@@ -29,22 +29,31 @@ export default function Dashboard() {
     const [refcodeFilter, setRefcodeFilter] = useState<string>("all");
 
     useEffect(() => {
-        const es = new EventSource("http://127.0.0.1:8000/stream");
-        es.onopen = () => {
-            console.log("Connection opened");
-        }
+        let es: EventSource;
+        let aborted = false;
 
-        es.onmessage = (event) => {
-            const donation: Donation = JSON.parse(event.data);
-            donation.timestamp = new Date(donation.timestamp); // parse ISO string → Date
-            setDonations(prev => [donation, ...prev].slice(0, 200));
+        const connect = async () => {
+            const credentials = btoa(`${import.meta.env.VITE_AUTH_USER}:${import.meta.env.VITE_AUTH_PASSWORD}`);
+            const res = await fetch("http://127.0.0.1:8000/stream/token", {
+                headers: { Authorization: `Basic ${credentials}` },
+            });
+            const { token } = await res.json();
+
+            if (aborted) return;
+
+            es = new EventSource(`http://127.0.0.1:8000/stream?token=${token}`);
+            es.onopen = () => console.log("Connection opened");
+
+            es.onmessage = (event) => {
+                const donation: Donation = JSON.parse(event.data);
+                donation.timestamp = new Date(donation.timestamp);
+                setDonations(prev => [donation, ...prev].slice(0, 200));
+            };
+            es.onerror = () => console.error("SSE connection lost, retrying...");
         };
 
-        es.onerror = () => {
-            console.error("SSE connection lost, retrying...");
-        };
-
-        return () => es.close();
+        connect();
+        return () => { aborted = true; es?.close(); };
     }, []);
 
     const allRefCodes: string[] = donations.filter((item: Donation, index: number, self: Donation[]) =>

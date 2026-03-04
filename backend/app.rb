@@ -2,6 +2,7 @@ require "sinatra"
 require "json"
 require "dotenv/load"
 require "concurrent"
+require "openssl"
 require_relative "lib/actblue"
 
 set :server, :puma
@@ -11,12 +12,15 @@ set :connections, Concurrent::Set.new
 
 PROCESSED_ORDERS = Concurrent::Set.new
 
-
 before do
   headers \
     "Access-Control-Allow-Origin"  => "http://localhost:5173",
     "Access-Control-Allow-Methods" => "GET, POST, OPTIONS",
-    "Access-Control-Allow-Headers" => "Content-Type"
+    "Access-Control-Allow-Headers" => "Content-Type, Authorization"
+end
+
+options "*" do
+  200
 end
 
 helpers do
@@ -31,6 +35,18 @@ helpers do
     return if authorized?
     halt 401, { error: "Not Authorized" }.to_json
   end
+
+  def generate_stream_token
+    OpenSSL::HMAC.hexdigest("SHA256", ENV["TOKEN_SECRET"], Time.now.to_i.to_s)
+  end
+
+  def valid_stream_token?(token)
+    return false if token.nil?
+    (0..60).any? do |offset|
+      expected = OpenSSL::HMAC.hexdigest("SHA256", ENV["TOKEN_SECRET"], (Time.now.to_i - offset).to_s)
+      Rack::Utils.secure_compare(expected, token)
+    end
+  end
 end
 
 get "/health" do
@@ -38,7 +54,14 @@ get "/health" do
   { status: "ok" }.to_json
 end
 
+get '/stream/token' do
+  protected!
+  content_type :json
+  { token: generate_stream_token }.to_json
+end
+
 get '/stream', provides: 'text/event-stream' do
+  halt 401, { error: "Not Authorized" }.to_json unless valid_stream_token?(params[:token])
   stream :keep_open do |out|
     if settings.connections.add?(out)
       puts "OPEN  — #{settings.connections.size} connections"
@@ -47,7 +70,7 @@ get '/stream', provides: 'text/event-stream' do
         puts "CLOSE — #{settings.connections.size} connections"
       }
     end
-    out << "heartbeat:\n"
+    out << ": heartbeat\n\n"
     sleep 1
   rescue
     out.close
