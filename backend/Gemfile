@@ -4,8 +4,10 @@ gem "sinatra"
 gem "puma"
 gem "dotenv"
 gem "concurrent-ruby"
+gem "redis"
 
 group :test do
   gem "rspec"
   gem "rack-test"
+  gem "fakeredis"
 end

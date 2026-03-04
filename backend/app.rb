@@ -3,6 +3,7 @@ require "json"
 require "dotenv/load"
 require "concurrent"
 require "openssl"
+require "redis"
 require_relative "lib/actblue"
 
 set :server, :puma
@@ -10,7 +11,26 @@ set :bind, 'localhost'
 set :port, ENV["PORT"] || 8000
 set :connections, Concurrent::Set.new
 
-PROCESSED_ORDERS = Concurrent::Set.new
+REDIS      = Redis.new(url: ENV.fetch("REDIS_URL", "redis://localhost:6379"))
+SUBSCRIBER = Redis.new(url: ENV.fetch("REDIS_URL", "redis://localhost:6379"))
+
+Thread.new do
+  SUBSCRIBER.subscribe("donations") do |on|
+    on.message do |_channel, message|
+      Sinatra::Application.settings.connections.each do |out|
+        out << "data: #{message}\n\n"
+      rescue
+        out.close
+      end
+    end
+  end
+end
+
+trap("INT") do
+  SUBSCRIBER.unsubscribe
+  Sinatra::Application.settings.connections.each(&:close)
+  raise Interrupt
+end
 
 before do
   headers \
@@ -93,7 +113,7 @@ post "/webhook/actblue_donation" do
 
   idempotency_key = ActBlue.idempotency_key(contribution["orderNumber"], line_item["paidAt"], line_item["lineitemId"])
 
-  unless PROCESSED_ORDERS.add?(idempotency_key)
+  unless REDIS.set(idempotency_key, "1", nx: true, ex: 86_400)
     puts "Duplicate webhook received for order #{contribution["orderNumber"]} paid at #{line_item["paidAt"]} with line item id #{line_item["lineitemId"]}, skipping"
     return { status: "already_processed" }.to_json
   end
@@ -109,12 +129,7 @@ post "/webhook/actblue_donation" do
     recurring: !payload["recurringPeriod"].nil?,
   }
 
-  settings.connections.each do |out|
-    out << "data: #{donation.to_json}\n\n"
-  rescue
-    puts "Closing connection: #{out}"
-    out.close
-  end
+  REDIS.publish("donations", donation.to_json)
   puts "Donation #{contribution["orderNumber"]} broadcast to #{settings.connections.size} client(s)"
   status 200
   { status: "received" }.to_json
